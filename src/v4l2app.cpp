@@ -7,7 +7,14 @@
 #include <unistd.h>          // close() 等
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-#include <stdio.h>            // snprintf() 拼文件名
+#include <stdio.h>         // snprintf() 拼文件名
+#include <sys/select.h>    // select() / fd_set
+#include <cstring>         // memcpy()
+#include <thread>          // std::thread
+#include <atomic>          // std::atomic<bool>
+#include <functional>      // std::ref()
+#include "frame.hpp"       // 本地头文件用引号
+
 
 // v4l2_work：把 V4L2 采集过程中要用到的几个参数结构体集中在一起，
 // 便于在类的成员函数之间整体传递（也是 v4l2_getfarem 的参数）。
@@ -66,6 +73,11 @@ public:
     // 获取一帧画面（待实现 V4L2 采集核心逻辑）
     int v4l2_getframe(v4l2_work app_work, v4l2_format fmt_my);
 
+    void loopread(FrameQueue &que);
+
+    // 停止采集循环：把 running_ 置 false，让 loopread 退出
+    void stopCapture();
+
     // 关闭设备、释放资源
     bool closeDevice();
 
@@ -74,7 +86,8 @@ private:
     struct v4l2_work work_que; // V4L2 参数集合，成员函数之间共用
     void *buffers_[4];         // 映射的缓冲区指针数组，最多 4 个缓冲
     size_t buffersLen_[4];     // 每个缓冲映射的长度（munmap 解除映射时要用）
-    unsigned nBuffers_ = 0;    // 实际分配的缓冲个数（REQBUFS 返回的 req.count）
+    unsigned nBuffers_ = 0;             // 实际分配的缓冲个数（REQBUFS 返回的 req.count）
+    std::atomic<bool> running_{true};   // 采集循环标志位，loopread() 循环用；跨线程读写必须原子
 };
 
 // 打开设备：调用系统 open() 拿到 fd
@@ -95,15 +108,15 @@ bool v4l2_APP::openDevice(const char *dev)
 bool v4l2_APP::closeDevice()
 {
     if (fd_ < 0)
-        return false;              // 从未打开，没有可清理的东西
+        return false; // 从未打开，没有可清理的东西
 
     enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    ioctl(fd_, VIDIOC_STREAMOFF, &type);   // 停流（若没开流，返回错被忽略，无害）
+    ioctl(fd_, VIDIOC_STREAMOFF, &type); // 停流（若没开流，返回错被忽略，无害）
 
     for (unsigned i = 0; i < nBuffers_; i++)
-        munmap(buffers_[i], buffersLen_[i]);   // 一个个解除映射
+        munmap(buffers_[i], buffersLen_[i]); // 一个个解除映射
 
-    ::close(fd_);       // 用全局 close，关闭设备文件描述符
+    ::close(fd_); // 用全局 close，关闭设备文件描述符
     fd_ = -1;
     return true;
 }
@@ -137,7 +150,7 @@ int v4l2_APP::v4l2_getframe(v4l2_work app_work, v4l2_format fmt_my)
         std::cerr << "Failed to request buffers" << std::endl;
         return -1;
     }
-    nBuffers_ = req.count;   // 记录内核实际给的个数，后面 munmap 循环要用它，别硬写 4
+    nBuffers_ = req.count; // 记录内核实际给的个数，后面 munmap 循环要用它，别硬写 4
 
     struct v4l2_buffer buf;
     buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -166,8 +179,8 @@ int v4l2_APP::v4l2_getframe(v4l2_work app_work, v4l2_format fmt_my)
             return -1;
         }
 
-        buffers_[i]    = mapped;      // 保存映射后的指针，后续可直接访问
-        buffersLen_[i] = buf.length;  // 保存这块的长度，munmap 时要用
+        buffers_[i] = mapped;        // 保存映射后的指针，后续可直接访问
+        buffersLen_[i] = buf.length; // 保存这块的长度，munmap 时要用
 
         if (ioctl(fd_, VIDIOC_QBUF, &buf) < 0)
         {
@@ -183,52 +196,47 @@ int v4l2_APP::v4l2_getframe(v4l2_work app_work, v4l2_format fmt_my)
         return -1;
     }
 
-    struct v4l2_buffer frame;
-    frame.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    frame.memory = V4L2_MEMORY_MMAP;
-
-    for (int n = 0; n < 10; n++) // 先抓 10 帧试试
-    {
-        // ① 出队：内核把"已填满的那块"的编号告诉我
-        if (ioctl(fd_, VIDIOC_DQBUF, &frame) < 0)
-        {
-            std::cerr << "DQBUF failed" << std::endl;
-            return -1;
-        }
-        // frame.index   ← 出队的是第几块
-        // frame.bytesused ← 这一帧实际字节数（MJPEG 每帧不一样，用它！）
-
-        // ② 用帧：这块数据就在 buffers_[frame.index] 里，是一整张 JPEG
-        unsigned char *data = (unsigned char *)buffers_[frame.index];
-
-        // 拼文件名：frame_0.jpg、frame_1.jpg ……
-        char name[64];
-        snprintf(name, sizeof(name), "frame_%d.jpg", n);
-
-        // 开文件（不存在就建、已存在就清空重写）
-        int f = open(name, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-        if (f < 0)
-        {
-            std::cerr << "open file failed" << std::endl;
-            return -1;
-        }
-
-        // 把这帧的 bytesused 字节原样写进文件，就是一张能打开的 jpg
-        write(f, data, frame.bytesused);
-        close(f);
-
-        // ③ 还回：把这块重新交给内核，装下一帧
-        if (ioctl(fd_, VIDIOC_QBUF, &frame) < 0)
-        {
-            std::cerr << "re-QBUF failed" << std::endl;
-            return -1;
-        }
-    }
 
     return 1;
 }
 
-// 程序入口：串起「打开 → 采集 → 收尾」整条流程
+void v4l2_APP::loopread(FrameQueue &que)
+{
+    struct v4l2_buffer buf = {0};   // {0} 清零，别留垃圾值
+    buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    buf.memory = V4L2_MEMORY_MMAP;
+
+    while (running_)
+    {
+        // ① select 带 2 秒超时等帧：有帧才往下走；超时则回循环头，顺带查 running_
+        fd_set fds;
+        struct timeval tv = {2, 0};
+        FD_ZERO(&fds);
+        FD_SET(fd_, &fds);
+        if (select(fd_ + 1, &fds, NULL, NULL, &tv) <= 0) continue;
+
+        // ② 取帧（出队：内核告诉我是第几块）
+        if (ioctl(fd_, VIDIOC_DQBUF, &buf) < 0) continue;
+
+        // ③ 拷一份出来 —— 数据从此归队列管，跟内核那 4 块 mmap 缓冲无关
+        unsigned char *copy = new unsigned char[buf.bytesused];
+        memcpy(copy, buffers_[buf.index], buf.bytesused);
+
+        // ④ 立刻还回（别等消费端！内核马上能继续用这块）
+        ioctl(fd_, VIDIOC_QBUF, &buf);
+
+        // ⑤ 塞队列（包成 Frame；满了队列自己丢最旧帧）
+        que.push(Frame(copy, buf.bytesused));
+    }
+}
+
+// 停止采集循环：把 running_ 置 false，loopread 下一轮 while 检查到就退
+void v4l2_APP::stopCapture()
+{
+    running_ = false;
+}
+
+// 程序入口：串起「打开 → 初始化 → 采集线程 → 消费 → 收尾」整条流程
 int main()
 {
     v4l2_APP cam;
@@ -245,17 +253,41 @@ int main()
     fmt.type                = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     fmt.fmt.pix.width       = 640;
     fmt.fmt.pix.height      = 480;
-    fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;   // 也可能是 YUYV，按摄像头定
+    fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG; // 也可能是 YUYV，按摄像头定
     fmt.fmt.pix.field       = V4L2_FIELD_NONE;
 
     v4l2_work work = {0};
 
-    // ③ 跑采集（当前抓 10 帧后返回）
+    // ③ 初始化采集（QUERYCAP/S_FMT/REQBUFS/mmap/QBUF/STREAMON，一次性）
     if (cam.v4l2_getframe(work, fmt) < 0)
     {
-        std::cerr << "capture failed" << std::endl;
+        std::cerr << "capture init failed" << std::endl;
         return 1;
     }
 
+    // ④ 有界队列（最多 4 帧），采集线程和消费线程共用这一个
+    FrameQueue queue(4);
+
+    // ⑤ 启动采集线程。std::ref 必须加：FrameQueue 里有 mutex，默认按值拷贝会编译报错
+    std::thread producer(&v4l2_APP::loopread, &cam, std::ref(queue));
+
+    // ⑥ 主线程当消费者：验证队列里拿到的是完整帧（下一步换成拆包发 UDP）
+    int n = 0;
+    Frame f;
+    while (queue.pop(f))
+    {
+        char name[64];
+        snprintf(name, sizeof(name), "frame_%d.jpg", n++);
+        int fd = open(name, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        if (fd >= 0)
+        {
+            write(fd, f.data, f.size);
+            close(fd);
+        }
+        delete[] f.data;   // 生产者 new、消费者 delete，用完释放！
+    }
+
+    cam.stopCapture();     // running_ = false，让采集线程退出
+    producer.join();       // 等采集线程真正结束
     return 0;
 }
