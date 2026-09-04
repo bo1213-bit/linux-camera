@@ -1,1 +1,5 @@
-linux-camera/
+# 编译产物
+build/
+camera
+*.o
+*.d

@@ -28,7 +28,7 @@ int main()
     fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG; // 也可能是 YUYV，按摄像头定
     fmt.fmt.pix.field       = V4L2_FIELD_NONE;
 
-    v4l2_work work = {0};
+    v4l2_work work;   // 成员自带默认初始化器，无需 {0}（C++11 下 {0} 会编译报错）
 
     // ③ 初始化采集（QUERYCAP/S_FMT/REQBUFS/mmap/QBUF/STREAMON，一次性）
     if (cam.v4l2_getframe(work, fmt) < 0)
