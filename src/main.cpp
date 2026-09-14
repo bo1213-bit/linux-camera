@@ -20,13 +20,16 @@ int main()
         return 1;
     }
 
-    // ② 目标格式：640×480 MJPEG（具体看摄像头 v4l2-ctl --list-formats-ext 支持啥）
+    // ② 目标格式：640×480 NV12（多平面：Y 平面 + UV 平面，共 2 个 plane）
+    //   NV12 是半平面 YUV：一个 Y 平面 + 一个交错的 UV 平面，物理上是两段内存，
+    //   所以 CSI 设备把采集节点暴露成 multi-planar，必须用 _MPLANE API 采集。
     v4l2_format fmt = {0};
-    fmt.type                = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    fmt.fmt.pix.width       = 640;
-    fmt.fmt.pix.height      = 480;
-    fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG; // 也可能是 YUYV，按摄像头定
-    fmt.fmt.pix.field       = V4L2_FIELD_NONE;
+    fmt.type                  = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE; // ← 多平面
+    fmt.fmt.pix_mp.width       = 640;
+    fmt.fmt.pix_mp.height      = 480;
+    fmt.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12;   // ← 多平面格式
+    fmt.fmt.pix_mp.field       = V4L2_FIELD_NONE;
+    fmt.fmt.pix_mp.num_planes  = 2;   // 给驱动的期望值；S_FMT 后以读回的为准
 
     v4l2_work work;   // 成员自带默认初始化器，无需 {0}（C++11 下 {0} 会编译报错）
 

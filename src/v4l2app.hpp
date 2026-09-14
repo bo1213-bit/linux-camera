@@ -17,23 +17,28 @@ struct v4l2_work
     //   cap.version      __u32     驱动版本号
     //   cap.capabilities __u32     能力位标志（判断是否采集 V4L2_CAP_VIDEO_CAPTURE、
     //                               是否支持流式 V4L2_CAP_STREAMING）
-    //   cap.device_caps  __u32     设备能力位
+    //   cap.device_caps  __u32     设备能力位（更准：仅当 capabilities 里有
+    //                               V4L2_CAP_DEVICE_CAPS 置位时才有效）
+    //   ⚠️ 多平面判断看这里：
+    //     V4L2_CAP_VIDEO_CAPTURE        (0x1)    支持 single-planar
+    //     V4L2_CAP_VIDEO_CAPTURE_MPLANE (0x1000) 支持 multi-planar
+    //     CSI 摄像头（NV12）通常只有 MPLANE，没有 CAPTURE——这就是要改多平面的根因。
     struct v4l2_capability cap;
 
-    // fmt —— 图像格式（struct v4l2_format，实际格式在 fmt.fmt.pix 里）。
-    // 用 VIDIOC_S_FMT 设置、VIDIOC_G_FMT 读取，关键字段及数据类型：
-    //   fmt.type                  __u32  缓冲类型（V4L2_BUF_TYPE_VIDEO_CAPTURE）
-    //   fmt.fmt.pix.width         __u32  分辨率宽（如 640）
-    //   fmt.fmt.pix.height        __u32  分辨率高（如 480）
-    //   fmt.fmt.pix.pixelformat   __u32  像素格式 fourcc（V4L2_PIX_FMT_YUYV / MJPEG）
-    //   fmt.fmt.pix.field         __u32  场序（一般 V4L2_FIELD_NONE）
-    //   fmt.fmt.pix.bytesperline  __u32  每行字节数
-    //   fmt.fmt.pix.sizeimage     __u32  一帧数据总字节数（存文件/发网络要用它）
+    // fmt —— 图像格式（struct v4l2_format，是个 union）。
+    //   单平面用 fmt.fmt.pix.*；多平面用 fmt.fmt.pix_mp.*，关键字段：
+    //     fmt.type                  __u32  缓冲类型（V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE）
+    //     fmt.fmt.pix_mp.width       __u32  分辨率宽（如 640）
+    //     fmt.fmt.pix_mp.height      __u32  分辨率高（如 480）
+    //     fmt.fmt.pix_mp.pixelformat __u32  像素格式 fourcc（V4L2_PIX_FMT_NV12）
+    //     fmt.fmt.pix_mp.field       __u32  场序（一般 V4L2_FIELD_NONE）
+    //     fmt.fmt.pix_mp.num_planes  __u32  平面数（NV12=2；S_FMT 后必须读回，别信填的值）
+    //     fmt.fmt.pix_mp.plane_fmt[j].sizeimage  __u32  第 j 个平面的大小
     struct v4l2_format fmt = {0};
 
     // req —— 缓冲申请（struct v4l2_requestbuffers）。
     //   req.count  __u32  想要几个缓冲（如 4）；调用后变成实际分配个数
-    //   req.type   __u32  缓冲类型（V4L2_BUF_TYPE_VIDEO_CAPTURE）
+    //   req.type   __u32  缓冲类型（多平面用 V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE）
     //   req.memory __u32  内存方式（V4L2_MEMORY_MMAP，零拷贝）
     struct v4l2_requestbuffers req = {0};
 
@@ -71,8 +76,13 @@ public:
 private:
     int fd_;                   // 摄像头设备的文件描述符，私有
     struct v4l2_work work_que; // V4L2 参数集合，成员函数之间共用
-    void *buffers_[4];         // 映射的缓冲区指针数组，最多 4 个缓冲
-    size_t buffersLen_[4];     // 每个缓冲映射的长度（munmap 时要用）
-    unsigned nBuffers_ = 0;             // 实际分配的缓冲个数（REQBUFS 返回的 req.count）
+    // ⚠️ 多平面改造：buffer 由"一维"变"二维"——每个 buffer 有多个 plane。
+    //   单平面：void* buffers_[4]，一块 buffer 一段连续内存。
+    //   多平面：一帧 = N 个 plane（NV12 = Y 平面 + UV 平面），每个 plane 各自 mmap，
+    //           所以要存 [buffer序号][plane序号]。
+    void   *buffers_[4][VIDEO_MAX_PLANES];      // [buffer序号][plane序号] 的 mmap 指针
+    size_t  buffersLen_[4][VIDEO_MAX_PLANES];   // 每个 plane 的映射长度（munmap / QBUF 填 length 都要用）
+    unsigned nBuffers_ = 0;   // 实际分配的缓冲个数（REQBUFS 返回的 req.count）
+    unsigned nPlanes_  = 0;  // 一帧有几个 plane（NV12=2；S_FMT 后读回得到，别信 main 里填的值）
     std::atomic<bool> running_{true};   // 采集循环标志位；跨线程读写必须原子
 };
