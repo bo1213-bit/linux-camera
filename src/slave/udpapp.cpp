@@ -48,10 +48,11 @@ udpapp::udpapp() : sock_(-1)
     }
 
     // ② 填目标地址：发给谁（接收端 IP + 端口，两端约定一致）
+    //   主机（Ubuntu PC）在连板子的网卡 ens37 上是 192.168.10.1（NFS 同网段）
     memset(&dst_, 0, sizeof(dst_));
     dst_.sin_family      = AF_INET;
     dst_.sin_port        = htons(5004);
-    dst_.sin_addr.s_addr = inet_addr("192.168.1.100");   // ← 改成接收端的 IP
+    dst_.sin_addr.s_addr = inet_addr("192.168.10.1");   // ← 主机（Ubuntu）的 IP
 }
 
 udpapp::~udpapp()

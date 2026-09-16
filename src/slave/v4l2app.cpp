@@ -14,6 +14,8 @@
 #include <sys/mman.h>
 #include <sys/select.h>  // select() / fd_set
 #include <cstring>       // memcpy()
+#include <cerrno>         // errno
+#include <system_error>  // strerror
 
 // 析构：对象销毁时自动关闭设备，防止 fd 泄漏
 v4l2_APP::~v4l2_APP()
@@ -166,7 +168,10 @@ int v4l2_APP::v4l2_getframe(v4l2_work app_work, v4l2_format fmt_my)
     enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
     if (ioctl(fd_, VIDIOC_STREAMON, &type) < 0)
     {
-        std::cerr << "STREAMON failed" << std::endl;
+        // rkisp 上 STREAMON 失败最常见 = 媒体管线没配（sensor→CSI→ISP→resizer→mainpath
+        //   没用 media-ctl 打通），此时 errno=EINVAL。EBUSY=节点被占（rkipc 没杀干净）。
+        std::cerr << "STREAMON failed: errno=" << errno
+                  << " (" << strerror(errno) << ")" << std::endl;
         return -1;
     }
 
