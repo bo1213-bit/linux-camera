@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git push *)",
+      "Bash(git config *)",
+      "Bash(git --version)",
+      "Bash(git count-objects *)",
+      "Bash(git rev-list *)",
+      "Bash(curl -v --max-time 20 https://github.com)",
+      "Bash(curl *)",
+      "Bash(echo \"exit=$?\")",
+      "Bash(Test-NetConnection -ComputerName 127.0.0.1 -Port 7897 -InformationLevel Quiet)"
+    ]
+  }
+}
